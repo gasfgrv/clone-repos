@@ -4,7 +4,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { existsSync, link, mkdirSync, read } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
@@ -30,7 +30,7 @@ export function getNextPage(linkHeader) {
         return null;
     }
 
-    const match = nextlink.match(/<([^>]+)>/);
+    const match = nextlink.match(/<([^<>]*)>/);
     return match?.[1] ?? null;
 }
 
@@ -42,23 +42,23 @@ export async function getRepositories(token, fetchImpl = fetch) {
         'User-Agent': 'NodeJS-Clone-CLI'
     };
 
-    const repos = [];
+    async function fetchPage(pageUrl) {
+        if (!pageUrl) {
+            return [];
+        }
 
-    while (url) {
-        const response = await fetchImpl(url, { headers });
+        const response = await fetchImpl(pageUrl, { headers });
 
         if (!response.ok) {
             throw new Error(`Erro na API: ${response.status} - ${response.statusText}`);
         }
 
         const data = await response.json();
-        repos.push(...data);
-
         const linkHeader = response.headers.get('link');
-        url = getNextPage(linkHeader);
+        return data.concat(await fetchPage(getNextPage(linkHeader)));
     }
 
-    return repos;
+    return fetchPage(url);
 }
 
 export async function cloneInParallel(repos, concurrencyLimit, method, username, token, rootDir, deps = {}) {
@@ -92,33 +92,37 @@ export async function cloneInParallel(repos, concurrencyLimit, method, username,
     }
 
     async function worker() {
-        while (currentIndex < repos.length) {
-            const index = currentIndex++;
-            const repo = repos[index];
-            const targetPath = path.join(rootDir, repo.name);
-
-            if (existsFn(targetPath)) {
-                skipped++;
-                processed++;
-                renderProgress();
-                continue;
-            }
-
-            const cloneUrl = method === 'ssh'
-                ? repo.ssh_url
-                : repo.clone_url.replace('https://', `https://${username}:${token}@`);
-
-            try {
-                await execFn(`git clone ${cloneUrl} "${targetPath}"`);
-                cloned++;
-            } catch (error) {
-                failed++;
-                errors.push({ repo: repo.name, message: error.message });
-            } finally {
-                processed++;
-                renderProgress();
-            }
+        if (currentIndex >= repos.length) {
+            return;
         }
+
+        const index = currentIndex++;
+        const repo = repos[index];
+        const targetPath = path.join(rootDir, repo.name);
+
+        if (existsFn(targetPath)) {
+            skipped++;
+            processed++;
+            renderProgress();
+            return worker();
+        }
+
+        const cloneUrl = method === 'ssh'
+            ? repo.ssh_url
+            : repo.clone_url.replace('https://', `https://${username}:${token}@`);
+
+        try {
+            await execFn(`git clone ${cloneUrl} "${targetPath}"`);
+            cloned++;
+        } catch (error) {
+            failed++;
+            errors.push({ repo: repo.name, message: error.message });
+        } finally {
+            processed++;
+            renderProgress();
+        }
+
+        return worker();
     }
 
     renderProgress();
